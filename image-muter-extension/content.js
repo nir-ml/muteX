@@ -15,16 +15,21 @@ class ImageMuter {
     this.observePage();
     this.scanPage();
 
-    chrome.runtime.onMessage.addListener((message) => {
+    // Listen for messages from the background script
+    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (message.action === 'rescan') {
+        console.log('Content script received rescan message.');
         this.processedPosts.clear();
         chrome.storage.local.get(['mutedImages'], (result) => {
           this.mutedImages = result.mutedImages || [];
+          console.log(`Loaded ${this.mutedImages.length} muted images for rescan.`);
           this.scanPage();
         });
+        sendResponse({ status: 'success', message: 'Rescan initiated.' });
       }
     });
   }
+
 
   observePage() {
     const observer = new MutationObserver((mutations) => {

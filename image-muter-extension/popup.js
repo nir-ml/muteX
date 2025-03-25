@@ -8,8 +8,8 @@ document.addEventListener('DOMContentLoaded', () => {
   let fetchedImageUrls = [];
 
   // Replace with your Google Custom Search API key and CSE ID
-  const GOOGLE_API_KEY = 'YOUR_GOOGLE_API_KEY';
-  const GOOGLE_CSE_ID = 'YOUR_CSE_ID';
+  const GOOGLE_API_KEY = 'AIzaSyBkm6C0lD-uV0JYkquQjI34z9FlU9Dyhio';
+  const GOOGLE_CSE_ID = 'b3c29ba5c3d3e41bc';
 
   fetchImagesButton.addEventListener('click', async () => {
     const keyword = keywordInput.value.trim();
@@ -55,23 +55,23 @@ document.addEventListener('DOMContentLoaded', () => {
   muteButton.addEventListener('click', () => {
     const selectedImages = Array.from(fetchedImagesDiv.querySelectorAll('input[type="checkbox"]:checked'))
       .map(checkbox => checkbox.dataset.url);
-
+  
     if (selectedImages.length === 0) {
       statusDiv.textContent = 'Please select at least one image to mute.';
       return;
     }
-
+  
     chrome.storage.local.set({ mutedImages: selectedImages }, () => {
       statusDiv.textContent = 'Images saved. Scanning feed...';
-      
-      // Retry logic for sending the rescan message
+  
+      // Send the rescan message via the background script
       const sendRescanMessage = (attempt = 1, maxAttempts = 3) => {
         if (!chrome.runtime?.id) {
           statusDiv.textContent = 'Extension context invalidated. Please reload the extension and try again.';
           console.error('Extension context invalidated. Cannot send rescan message.');
           return;
         }
-
+  
         chrome.runtime.sendMessage({ action: 'rescan' }, (response) => {
           if (chrome.runtime.lastError) {
             console.error(`Attempt ${attempt} failed: ${chrome.runtime.lastError.message}`);
@@ -82,13 +82,16 @@ document.addEventListener('DOMContentLoaded', () => {
               statusDiv.textContent = 'Error triggering rescan after multiple attempts. Please reload the extension.';
               console.error('Max attempts reached. Could not trigger rescan.');
             }
+          } else if (response.status === 'error') {
+            statusDiv.textContent = `Error: ${response.message}`;
+            console.error(`Rescan failed: ${response.message}`);
           } else {
             statusDiv.textContent = 'Rescan triggered. Check the feed.';
             console.log('Rescan message sent successfully.');
           }
         });
       };
-
+  
       sendRescanMessage();
     });
   });
