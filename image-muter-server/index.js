@@ -1,27 +1,20 @@
 const express = require('express');
-const axios = require('axios');
-const sharp = require('sharp');
 const cors = require('cors');
-
 const app = express();
+const port = 3000;
+
 app.use(cors());
+app.use(express.json());
 
-// Increase payload limit to 50mb to handle large data URLs
-app.use(express.raw({ type: 'application/json', limit: '50mb' }));
+// Placeholder for image comparison logic
+async function compareImages(img1, img2) {
+  // This is a placeholder. Replace with actual image comparison logic.
+  // For now, return a random similarity score for testing.
+  console.log(`Comparing images: ${img1} vs ${img2}`);
+  return Math.random();
+}
 
-// Middleware to parse JSON
-app.use((req, res, next) => {
-  console.log('Raw request body length:', req.body.length);
-  console.log('Raw request body (first 100 chars):', req.body.toString().slice(0, 100));
-  try {
-    req.body = JSON.parse(req.body.toString());
-    next();
-  } catch (error) {
-    console.error('JSON parsing error:', error.message);
-    res.status(400).json({ error: 'Invalid JSON payload' });
-  }
-});
-
+// Existing endpoint for batch comparisons
 app.post('/compare-images-batch', async (req, res) => {
   console.log('Received request at /compare-images-batch');
   console.log('Parsed body imagePairs length:', req.body.imagePairs?.length);
@@ -32,44 +25,43 @@ app.post('/compare-images-batch', async (req, res) => {
     return res.status(400).json({ error: 'imagePairs must be an array' });
   }
 
-  const results = await Promise.all(
-    imagePairs.map(async ({ image1Url, image2Url }) => {
-      try {
-        console.log(`Comparing images: ${image1Url.slice(0, 50)}... and ${image2Url.slice(0, 50)}...`);
-        const image1Response = await axios.get(image1Url, {
-          responseType: 'arraybuffer',
-          headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36' },
-          timeout: 10000
-        });
-        const image2Response = await axios.get(image2Url, {
-          responseType: 'arraybuffer',
-          headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36' },
-          timeout: 10000
-        });
-
-        const image1 = await sharp(image1Response.data).normalize().resize(100, 100).grayscale().raw().toBuffer();
-        const image2 = await sharp(image2Response.data).normalize().resize(100, 100).grayscale().raw().toBuffer();
-
-        let diff = 0;
-        for (let i = 0; i < image1.length; i++) {
-          diff += Math.abs(image1[i] - image2[i]);
+  try {
+    const results = await Promise.all(
+      imagePairs.map(async (pair) => {
+        const { img1, img2 } = pair;
+        if (!img1 || !img2) {
+          return { img1, img2, similarity: 0, error: 'Missing image URL' };
         }
-
-        const maxDiff = 100 * 100 * 255;
-        const similarity = 1 - (diff / maxDiff);
-
-        return { image1Url, image2Url, similarity };
-      } catch (error) {
-        console.error('Server comparison error:', error.message);
-        return { image1Url, image2Url, error: 'Failed to compare images' };
-      }
-    })
-  );
-
-  res.json(results);
+        const similarity = await compareImages(img1, img2);
+        return { img1, img2, similarity };
+      })
+    );
+    res.json({ results });
+  } catch (error) {
+    console.error('Error in batch comparison:', error);
+    res.status(500).json({ error: 'Failed to compare images' });
+  }
 });
 
-const PORT = 3000;
-app.listen(PORT, 'localhost', () => {
-  console.log(`Server running on http://localhost:${PORT}`);
+// New endpoint for single image comparison
+app.post('/compare', async (req, res) => {
+  console.log('Received request at /compare');
+  const { img1, img2 } = req.body;
+
+  if (!img1 || !img2) {
+    console.log('Invalid request body:', req.body);
+    return res.status(400).json({ error: 'img1 and img2 are required' });
+  }
+
+  try {
+    const similarity = await compareImages(img1, img2);
+    res.json({ similarity });
+  } catch (error) {
+    console.error('Error comparing images:', error);
+    res.status(500).json({ error: 'Failed to compare images' });
+  }
+});
+
+app.listen(port, () => {
+  console.log(`Server running on port ${port}`);
 });
