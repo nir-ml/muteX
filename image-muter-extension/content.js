@@ -5,13 +5,18 @@ class ImageMuter {
     this.isScanning = false;
     this.scanTimeout = null;
     this.serverUrl = 'http://localhost:3000';
-    this.isMutating = false;
+    this.isMuting = false;
+    this.postImageMap = new Map();
     this.init();
   }
 
   async init() {
-    const { mutedImages } = await chrome.storage.local.get('mutedImages');
+    // Load muted images and processed posts from storage
+    const { mutedImages, processedPosts } = await chrome.storage.local.get(['mutedImages', 'processedPosts']);
     this.mutedImages = mutedImages || [];
+    this.processedPosts = new Set(processedPosts || []);
+    console.log(`Initialized with ${this.mutedImages.length} muted images and ${this.processedPosts.size} processed posts.`);
+
     this.observePage();
     this.scanPage();
 
@@ -20,184 +25,173 @@ class ImageMuter {
       if (message.action === 'rescan') {
         console.log('Content script received rescan message.');
         this.processedPosts.clear();
-        chrome.storage.local.get(['mutedImages'], (result) => {
-          this.mutedImages = result.mutedImages || [];
-          console.log(`Loaded ${this.mutedImages.length} muted images for rescan.`);
-          this.scanPage();
+        chrome.storage.local.set({ processedPosts: [] }, () => {
+          chrome.storage.local.get(['mutedImages'], (result) => {
+            this.mutedImages = result.mutedImages || [];
+            console.log(`Loaded ${this.mutedImages.length} muted images for rescan.`);
+            this.scanPage();
+          });
         });
         sendResponse({ status: 'success', message: 'Rescan initiated.' });
       }
     });
   }
 
-
   observePage() {
     const observer = new MutationObserver((mutations) => {
-      if (this.isMutating) {
-        console.log('Skipping mutation observation due to ongoing mutation');
-        return;
-      }
-
-      if (this.scanTimeout) {
-        clearTimeout(this.scanTimeout);
-      }
-      this.scanTimeout = setTimeout(() => {
-        if (!this.isScanning) {
-          this.scanPage();
-        }
-      }, 300);
+      if (this.scanTimeout) clearTimeout(this.scanTimeout);
+      this.scanTimeout = setTimeout(() => this.scanPage(), 500);
     });
 
     observer.observe(document.body, {
       childList: true,
       subtree: true,
-      attributes: true,
-      attributeFilter: ['src'],
     });
   }
 
   async scanPage() {
-    if (this.isScanning || !this.mutedImages.length) {
-      this.updatePopupStatus('No images to scan or already scanning');
+    if (this.isScanning) {
+      this.sendStatusUpdate('No images to scan or already scanning');
       return;
     }
 
     this.isScanning = true;
-    this.updatePopupStatus('Starting scan...');
+    this.sendStatusUpdate('Starting scan...');
     const startTime = performance.now();
 
-    const posts = document.querySelectorAll('article[data-testid="tweet"]');
-    let postsScanned = 0;
-    let postsMuted = 0;
-
+    const posts = Array.from(document.querySelectorAll('article[role="article"]'));
     console.log(`Found ${posts.length} potential posts to scan`);
 
-    const imageTasks = [];
-    const postImageMap = new Map();
+    let mutedCount = 0;
 
     for (const post of posts) {
-      const usernameElement = post.querySelector('a[href*="/"] span');
-      const timeElement = post.querySelector('time');
-      const username = usernameElement ? usernameElement.innerText : 'unknown';
-      const timestamp = timeElement ? timeElement.getAttribute('datetime') : 'unknown';
-      const postId = `${username}-${timestamp}`;
-
-      if (this.processedPosts.has(postId)) {
-        console.log(`Skipping already processed post: ${postId}`);
+      const postId = this.getPostId(post);
+      if (!postId || this.processedPosts.has(postId)) {
+        if (this.processedPosts.has(postId)) {
+          console.log(`Skipping already processed post: ${postId}`);
+        }
         continue;
       }
 
-      const images = post.querySelectorAll('img[src*="/media/"]:not([alt="Image of user"])');
+      // Handle both original posts and retweets
+      const images = this.getImagesFromPost(post);
       console.log(`Found ${images.length} images in post: ${postId}`);
 
-      for (const img of images) {
-        if (!img.src) {
-          console.log(`Image in post ${postId} has no src, skipping`);
-          continue;
-        }
+      if (images.length === 0) {
+        this.processedPosts.add(postId);
+        continue;
+      }
 
-        if (img.complete && img.naturalWidth) {
-          const src = img.src;
-          console.log(`Adding image to postImageMap: ${src} for post ${postId}`);
-          imageTasks.push({ src, postId });
-          postImageMap.set(src, post);
-        } else {
-          console.log(`Image not loaded yet, will catch in next scan: ${img.src}`);
-        }
+      for (const img of images) {
+        const src = img.src;
+        if (!src) continue;
+
+        console.log(`Adding image to postImageMap: ${src} for post ${postId}`);
+        this.postImageMap.set(src, postId);
       }
 
       this.processedPosts.add(postId);
-      postsScanned++;
     }
 
-    if (imageTasks.length > 0) {
-      const imagePairs = [];
-      for (const { src, postId } of imageTasks) {
-        for (const mutedImgData of this.mutedImages) {
-          imagePairs.push({ image1Url: mutedImgData, image2Url: src, postId });
-        }
-      }
+    // Persist processedPosts to storage
+    chrome.storage.local.set({ processedPosts: Array.from(this.processedPosts) });
 
-      try {
-        const results = await this.compareImagesBatch(imagePairs);
+    // Compare images with muted images
+    for (const [imgSrc, postId] of this.postImageMap) {
+      for (const mutedImg of this.mutedImages) {
+        const similarity = await this.compareImages(imgSrc, mutedImg);
+        console.log(`Image similarity for ${imgSrc} in post ${postId}: ${similarity}`);
 
-        for (const { image1Url, image2Url, similarity, error, postId } of results) {
-          if (error) {
-            console.error(`Error comparing images for post ${postId}: ${error}`);
-            continue;
-          }
-          console.log(`Image similarity for ${image2Url} in post ${postId}: ${similarity}`);
-          if (similarity >= 0.4) {
-            console.log(`Looking up post for image: ${image2Url}`);
-            const post = postImageMap.get(image2Url);
-            if (post) {
-              this.mutePost(post);
-              postsMuted++;
-              console.log(`Muted post due to matching image: ${post.innerText.slice(0, 50)} (postId: ${postId})`);
-            } else {
-              console.error(`Post not found for image: ${image2Url}`);
-            }
+        if (similarity >= 0.4) {
+          console.log(`Looking up post for image: ${imgSrc}`);
+          const postElement = this.getPostElementById(postId);
+          if (postElement) {
+            this.mutePost(postElement, postId);
+            mutedCount++;
+            console.log(`Muted post due to matching image: ${this.getPostText(postElement)} (postId: ${postId})`);
+            break; // Stop checking other muted images for this post
           }
         }
-      } catch (error) {
-        console.error('Failed to compare images:', error);
       }
     }
 
-    const endTime = performance.now();
-    console.log(`Scan completed in ${endTime - startTime}ms`);
-
-    this.updatePopupStatus(`Scan complete: Scanned ${postsScanned} posts, muted ${postsMuted} posts`);
+    const duration = performance.now() - startTime;
+    console.log(`Scan completed in ${duration}ms`);
+    this.sendStatusUpdate(`Scan complete: Scanned ${posts.length} posts, muted ${mutedCount} posts`);
     this.isScanning = false;
   }
 
-  async compareImagesBatch(imagePairs) {
-    try {
-      const response = await fetch(`${this.serverUrl}/compare-images-batch`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ imagePairs }),
-      });
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-      const results = await response.json();
-      return results;
-    } catch (error) {
-      console.error('Server batch comparison error:', error);
-      throw error;
-    }
-  }
+  getImagesFromPost(post) {
+    // Look for images in both original posts and retweets
+    const imageSelectors = [
+      'img[src*="pbs.twimg.com/media"]', // Original post images
+      'div[data-testid="tweetPhoto"] img', // Images in retweets
+      'div[role="blockquote"] img[src*="pbs.twimg.com/media"]', // Retweet-specific images
+    ];
 
-  mutePost(post) {
-    if (!post.closest('article[data-testid="tweet"]')) {
-      console.warn('Attempted to mute a non-tweet element, skipping:', post);
-      return;
-    }
-
-    this.isMutating = true;
-    post.style.display = 'none';
-    console.log('Muted post:', post.innerText.slice(0, 50));
-    this.isMutating = false;
-  }
-
-  updatePopupStatus(message) {
-    if (!chrome.runtime?.id) {
-      console.log('Extension context invalidated, skipping status update:', message);
-      return;
-    }
-  
-    try {
-      chrome.runtime.sendMessage({ status: message }, (response) => {
-        if (chrome.runtime.lastError) {
-          console.log(`Popup not open or context invalidated, skipping status update: ${message}`);
-        } else {
-          console.log(`Popup status updated: ${message}`);
+    const images = [];
+    for (const selector of imageSelectors) {
+      const foundImages = post.querySelectorAll(selector);
+      foundImages.forEach((img) => {
+        if (img.src && !images.includes(img)) {
+          images.push(img);
         }
       });
-    } catch (error) {
-      console.error('Error sending message to popup:', error);
     }
+    return images;
+  }
+
+  getPostId(post) {
+    const timeElement = post.querySelector('time');
+    if (!timeElement) return null;
+    const datetime = timeElement.getAttribute('datetime');
+    if (!datetime) return null;
+
+    const usernameElement = post.querySelector('a[href*="/status/"]');
+    const username = usernameElement ? usernameElement.href.split('/')[3] : 'unknown';
+    return `${username}-${datetime}`;
+  }
+
+  getPostElementById(postId) {
+    const posts = Array.from(document.querySelectorAll('article[role="article"]'));
+    return posts.find((post) => this.getPostId(post) === postId) || null;
+  }
+
+  getPostText(post) {
+    const textElement = post.querySelector('div[lang]');
+    return textElement ? textElement.textContent : 'Unknown post content';
+  }
+
+  async compareImages(img1Src, img2Src) {
+    try {
+      const response = await fetch(`${this.serverUrl}/compare`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ img1: img1Src, img2: img2Src }),
+      });
+      const data = await response.json();
+      return data.similarity || 0;
+    } catch (error) {
+      console.error('Error comparing images:', error);
+      return 0;
+    }
+  }
+
+  mutePost(postElement, postId) {
+    if (!this.isMuting) {
+      this.isMuting = true;
+      console.log(`Muted post: ${this.getPostText(postElement)}`);
+      postElement.style.display = 'none';
+      this.isMuting = false;
+    }
+  }
+
+  sendStatusUpdate(message) {
+    chrome.runtime.sendMessage({ action: 'statusUpdate', message }, (response) => {
+      if (chrome.runtime.lastError) {
+        console.log(`Popup not open or context invalidated, skipping status update: ${message}`);
+      }
+    });
   }
 }
 
