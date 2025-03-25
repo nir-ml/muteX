@@ -7,26 +7,68 @@ class ImageMuter {
     this.observer = null;
     this.pendingPosts = new Set();
     this.isScanning = false;
+    this.scanTimeout = null;
   }
 
-  // Initialize the observer to watch for new posts
+  // Initialize the extension
   init() {
-    this.setupMutationObserver();
+    // Inject CSS to hide posts by default
+    this.injectCSS();
+    // Load muted images and start observing
+    this.loadMutedImages().then(() => {
+      console.log(`Loaded ${this.mutedImages.length} muted images for rescan.`);
+      this.setupMutationObserver();
+      this.scanInitialPosts();
+    });
+
+    // Listen for rescan messages from the popup
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (message.action === 'rescan') {
         console.log('Content script received rescan message.');
         this.loadMutedImages().then(() => {
           console.log(`Loaded ${this.mutedImages.length} muted images for rescan.`);
-          this.scanPage();
+          this.processedPosts.clear(); // Reset processed posts for a fresh scan
+          this.scanInitialPosts();
         });
       }
     });
+  }
+
+  // Inject CSS to hide posts by default
+  injectCSS() {
+    const style = document.createElement('style');
+    style.textContent = `
+      article[data-image-muter] {
+        display: none !important;
+      }
+      article[data-image-muter][data-processed="false"] {
+        display: none !important;
+      }
+      article[data-image-muter][data-processed="true"][data-muted="false"] {
+        display: block !important;
+      }
+    `;
+    document.head.appendChild(style);
   }
 
   // Load muted images from storage
   async loadMutedImages() {
     const data = await chrome.storage.local.get('mutedImages');
     this.mutedImages = data.mutedImages || [];
+  }
+
+  // Scan posts already present in the DOM on initial load
+  scanInitialPosts() {
+    const articles = document.querySelectorAll('article');
+    articles.forEach((article) => {
+      if (!article.dataset.imageMuter) {
+        article.dataset.imageMuter = 'true';
+        article.dataset.processed = 'false';
+        article.dataset.muted = 'false';
+        this.pendingPosts.add(article);
+      }
+    });
+    this.debounceScan();
   }
 
   // Set up MutationObserver to watch for new posts
@@ -43,20 +85,17 @@ class ImageMuter {
           if (node.nodeType === Node.ELEMENT_NODE) {
             const articles = node.querySelectorAll('article') || [];
             articles.forEach((article) => {
-              if (!this.pendingPosts.has(article)) {
+              if (!article.dataset.imageMuter) {
+                article.dataset.imageMuter = 'true';
+                article.dataset.processed = 'false';
+                article.dataset.muted = 'false';
                 this.pendingPosts.add(article);
-                // Hide the post immediately to prevent rendering
-                article.style.display = 'none';
               }
             });
           }
         });
       });
-
-      // Process pending posts in batches
-      if (!this.isScanning) {
-        this.processPendingPosts();
-      }
+      this.debounceScan();
     });
 
     this.observer.observe(targetNode, {
@@ -65,9 +104,20 @@ class ImageMuter {
     });
   }
 
+  // Debounce the scanning process to avoid performance issues
+  debounceScan() {
+    if (this.scanTimeout) {
+      clearTimeout(this.scanTimeout);
+    }
+    this.scanTimeout = setTimeout(() => {
+      this.processPendingPosts();
+    }, 100); // Adjust delay as needed
+  }
+
   // Process pending posts in batches
   async processPendingPosts() {
     if (this.pendingPosts.size === 0 || this.mutedImages.length === 0) {
+      this.isScanning = false;
       return;
     }
 
@@ -77,19 +127,22 @@ class ImageMuter {
 
     console.log(`Found ${postsToProcess.length} potential posts to scan`);
 
+    const startTime = performance.now();
+
     // Build postImageMap for the batch
     for (const post of postsToProcess) {
       const postId = this.getPostId(post);
       if (!postId || this.processedPosts.has(postId)) {
-        // If already processed, keep it hidden if it was muted, or show it if not
         if (this.processedPosts.has(postId)) {
-          const wasMuted = post.dataset.wasMuted === 'true';
-          post.style.display = wasMuted ? 'none' : '';
+          post.dataset.processed = 'true';
+          post.dataset.muted = post.dataset.wasMuted || 'false';
         }
         continue;
       }
 
-      const images = Array.from(post.querySelectorAll('img')).map((img) => img.src).filter((src) => src && !src.includes('profile_images'));
+      const images = Array.from(post.querySelectorAll('img'))
+        .map((img) => img.src)
+        .filter((src) => src && !src.includes('profile_images'));
       console.log(`Found ${images.length} images in post: ${postId}`);
 
       if (images.length > 0) {
@@ -107,7 +160,7 @@ class ImageMuter {
       for (const mutedImg of this.mutedImages) {
         const similarity = await this.compareImages(imgSrc, mutedImg);
         console.log(`Image similarity for ${imgSrc} in post ${postId}: ${similarity}`);
-        if (similarity >= 0.4) {
+        if (similarity >= 0.85) { // Adjusted threshold for better accuracy
           shouldMute = true;
           console.log(`Looking up post for image: ${imgSrc}`);
           break;
@@ -117,26 +170,28 @@ class ImageMuter {
       const postElement = postsToProcess.find((post) => this.getPostId(post) === postId);
       if (postElement) {
         this.processedPosts.add(postId);
+        postElement.dataset.processed = 'true';
         if (shouldMute) {
+          postElement.dataset.muted = 'true';
           postElement.dataset.wasMuted = 'true';
-          postElement.style.display = 'none'; // Keep it hidden
           mutedCount++;
           console.log(`Muted post due to matching image: ${this.getPostText(postElement)} (postId: ${postId})`);
         } else {
+          postElement.dataset.muted = 'false';
           postElement.dataset.wasMuted = 'false';
-          postElement.style.display = ''; // Show the post
         }
       }
     }
 
     this.postImageMap.clear();
-    console.log(`Scan completed in ${performance.now()}ms`);
+    const duration = performance.now() - startTime;
+    console.log(`Scan completed in ${duration}ms`);
     this.updatePopupStatus(`Scan complete: Scanned ${postsToProcess.length} posts, muted ${mutedCount} posts`);
     this.isScanning = false;
 
     // Continue processing if more posts were added during the scan
     if (this.pendingPosts.size > 0) {
-      this.processPendingPosts();
+      this.debounceScan();
     }
   }
 
@@ -158,6 +213,13 @@ class ImageMuter {
 
   // Compare two images by sending them to the server
   async compareImages(img1Src, img2Src) {
+    const cacheKey = `comparison:${img1Src}:${img2Src}`;
+    const cached = await chrome.storage.local.get(cacheKey);
+    if (cached[cacheKey]) {
+      console.log(`Using cached similarity for ${img1Src} vs ${img2Src}: ${cached[cacheKey]}`);
+      return cached[cacheKey];
+    }
+
     try {
       const response = await fetch(`${this.serverUrl}/compare`, {
         method: 'POST',
@@ -165,7 +227,9 @@ class ImageMuter {
         body: JSON.stringify({ img1: img1Src, img2: img2Src }),
       });
       const data = await response.json();
-      return data.similarity || 0;
+      const similarity = data.similarity || 0;
+      await chrome.storage.local.set({ [cacheKey]: similarity });
+      return similarity;
     } catch (error) {
       console.error('Error comparing images:', error);
       return 0;
