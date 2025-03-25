@@ -1,67 +1,80 @@
 const express = require('express');
 const cors = require('cors');
-const app = express();
-const port = 3000;
+const axios = require('axios');
+const sharp = require('sharp');
+const { imageHash } = require('image-hash');
 
+const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Placeholder for image comparison logic
-async function compareImages(img1, img2) {
-  // This is a placeholder. Replace with actual image comparison logic.
-  // For now, return a random similarity score for testing.
-  console.log(`Comparing images: ${img1} vs ${img2}`);
-  return Math.random();
+// Resize images to 256x256 for consistent hashing (Fixes Issue #1: Missed Match)
+async function hashImage(url) {
+  try {
+    const response = await axios.get(url, { responseType: 'arraybuffer' });
+    const buffer = Buffer.from(response.data, 'binary');
+    const resizedBuffer = await sharp(buffer)
+      .resize(256, 256, { fit: 'fill' })
+      .toBuffer();
+    return new Promise((resolve, reject) => {
+      imageHash({ data: resizedBuffer }, 16, true, (err, hash) => {
+        if (err) reject(err);
+        else resolve(hash);
+      });
+    });
+  } catch (error) {
+    console.error(`Error hashing image ${url}:`, error.message);
+    return null;
+  }
 }
 
-// Existing endpoint for batch comparisons
-app.post('/compare-images-batch', async (req, res) => {
-  console.log('Received request at /compare-images-batch');
-  console.log('Parsed body imagePairs length:', req.body.imagePairs?.length);
-
-  const { imagePairs } = req.body;
-  if (!imagePairs || !Array.isArray(imagePairs)) {
-    console.log('Invalid imagePairs:', imagePairs);
-    return res.status(400).json({ error: 'imagePairs must be an array' });
+function hammingDistance(hash1, hash2) {
+  if (!hash1 || !hash2 || hash1.length !== hash2.length) return 1;
+  let distance = 0;
+  for (let i = 0; i < hash1.length; i++) {
+    if (hash1[i] !== hash2[i]) distance++;
   }
+  return distance / hash1.length;
+}
 
-  try {
-    const results = await Promise.all(
-      imagePairs.map(async (pair) => {
-        const { img1, img2 } = pair;
-        if (!img1 || !img2) {
-          return { img1, img2, similarity: 0, error: 'Missing image URL' };
-        }
-        const similarity = await compareImages(img1, img2);
-        return { img1, img2, similarity };
-      })
-    );
-    res.json({ results });
-  } catch (error) {
-    console.error('Error in batch comparison:', error);
-    res.status(500).json({ error: 'Failed to compare images' });
-  }
-});
-
-// New endpoint for single image comparison
 app.post('/compare', async (req, res) => {
   console.log('Received request at /compare');
   const { img1, img2 } = req.body;
-
-  if (!img1 || !img2) {
-    console.log('Invalid request body:', req.body);
-    return res.status(400).json({ error: 'img1 and img2 are required' });
-  }
-
   try {
-    const similarity = await compareImages(img1, img2);
+    const hash1 = await hashImage(img1);
+    const hash2 = await hashImage(img2);
+    const distance = hammingDistance(hash1, hash2);
+    const similarity = 1 - distance;
     res.json({ similarity });
   } catch (error) {
-    console.error('Error comparing images:', error);
-    res.status(500).json({ error: 'Failed to compare images' });
+    console.error('Error comparing images:', error.message);
+    res.status(500).json({ similarity: 0 });
   }
 });
 
-app.listen(port, () => {
-  console.log(`Server running on port ${port}`);
+// Batch comparison endpoint (Fixes Issue #4: Slow Performance)
+app.post('/compareBatch', async (req, res) => {
+  console.log('Received request at /compareBatch');
+  const { pairs } = req.body;
+  const results = [];
+
+  for (const pair of pairs) {
+    const { img1, img2, cacheKey } = pair;
+    try {
+      const hash1 = await hashImage(img1);
+      const hash2 = await hashImage(img2);
+      const distance = hammingDistance(hash1, hash2);
+      const similarity = 1 - distance;
+      results.push({ img1, img2, similarity, cacheKey });
+    } catch (error) {
+      console.error(`Error comparing ${img1} and ${img2}:`, error.message);
+      results.push({ img1, img2, similarity: 0, cacheKey });
+    }
+  }
+
+  res.json({ results });
+});
+
+app.listen(3000, () => {
+  console.log('Server running on port 3000');
 });
