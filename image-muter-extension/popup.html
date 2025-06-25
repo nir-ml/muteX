@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Image Muter for X</title>
+  <style>
+    body {
+      width: 300px;
+      padding: 10px;
+      font-family: Arial, sans-serif;
+    }
+    input, button {
+      margin: 5px 0;
+      padding: 5px;
+      width: 100%;
+      box-sizing: border-box;
+    }
+    #status {
+      margin-top: 10px;
+      font-size: 12px;
+      color: #333;
+    }
+    #fetchedImages {
+      margin-top: 10px;
+      max-height: 200px;
+      overflow-y: auto;
+    }
+    .image-preview {
+      display: flex;
+      align-items: center;
+      margin: 5px 0;
+    }
+    .image-preview img {
+      width: 50px;
+      height: 50px;
+      margin-right: 10px;
+    }
+  </style>
+</head>
+<body>
+  <h3>Image Muter for X</h3>
+  <input type="text" id="keywordInput" placeholder="Enter keyword (e.g., Saratoga bottle)" />
+  <button id="fetchImages">Fetch Images</button>
+  <div id="fetchedImages"></div>
+  <button id="muteButton" disabled>Mute Posts</button>
+  <div id="status">Enter a keyword to start.</div>
+  <script src="popup.js"></script>
+</body>
+</html>
